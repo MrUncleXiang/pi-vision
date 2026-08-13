@@ -25,8 +25,9 @@
  * Config + cache are shared via `lib/state.ts` (set by vision.ts on
  * session_start + every mutation).
  */
-import { existsSync, statSync } from "node:fs";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { existsSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute, resolve as resolvePath, join } from "node:path";
+import { tmpdir } from "node:os";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { isMultimodal } from "../lib/capability.ts";
@@ -131,6 +132,30 @@ async function loadAndDedup(
   }
 
   return { loaded, existingHashes };
+}
+
+/** Convert in-memory attachments (pi-web pasted images arrive as
+ *  `event.images` ImageContent — no file-path token in the text) into
+ *  LoadedImage entries by writing them to a temp file, so the existing
+ *  path-based delegate pipeline can process them unchanged. */
+async function attachmentsToLoadedImages(
+  attachments: ImageContent[],
+  existingHashes: Set<string>,
+  cwd: string,
+): Promise<LoadedImage[]> {
+  const loaded: LoadedImage[] = [];
+  for (let i = 0; i < attachments.length; i++) {
+    const att = attachments[i];
+    if (!att) continue;
+    const hash = hashData(att.data);
+    if (existingHashes.has(hash)) continue; // already seen (dedup)
+    existingHashes.add(hash);
+    const ext = att.mimeType === "image/jpeg" ? ".jpg" : att.mimeType === "image/webp" ? ".webp" : att.mimeType === "image/gif" ? ".gif" : ".png";
+    const abs = join(tmpdir(), `pi-web-attach-${Date.now()}-${i}${ext}`);
+    writeFileSync(abs, Buffer.from(att.data, "base64"));
+    loaded.push({ token: abs, abs, data: att.data, mimeType: att.mimeType || "image/png", hash });
+  }
+  return loaded;
 }
 
 /** Build the resolved map for renderMarkers: token → index in the final
@@ -322,14 +347,31 @@ export default function pasteExtension(_pi: ExtensionAPI): void {
     if (!config) return { action: "continue" as const }; // before session_start
 
     const tokens = findImagePathTokens(event.text);
-    if (tokens.length === 0) return { action: "continue" as const };
+    const attachments = event.images ?? [];
+    // pi-web pasted images arrive as in-memory attachments (event.images) with
+    // no file-path token in the text. Handle them too — otherwise a text-only
+    // primary never sees them (core replaces them with "(image omitted)").
+    if (tokens.length === 0 && attachments.length === 0) return { action: "continue" as const };
 
     const multimodal = isMultimodal(ctx.model);
-    const { loaded, existingHashes } = await loadAndDedup(
+    const { loaded: pathLoaded, existingHashes } = await loadAndDedup(
       tokens,
-      event.images ?? [],
+      attachments,
       ctx.cwd,
     );
+
+    // FIX: dedup in-memory attachments against ONLY the path-loaded images,
+    // NOT the `existingHashes` returned by loadAndDedup (which already contains
+    // the attachments' own hashes). Reusing that set made attachmentsToLoadedImages
+    // treat every pasted pi-web image as a duplicate and drop it → "image omitted".
+    const attachmentDedupBase = new Set(pathLoaded.map((l) => l.hash));
+
+    // Merge in-memory attachments into the loaded list (temp-file backed so
+    // the delegate pipeline can read them from disk). Skip for multimodal —
+    // attachments already pass through natively there.
+    const loaded = !multimodal
+      ? [...pathLoaded, ...(await attachmentsToLoadedImages(attachments, attachmentDedupBase, ctx.cwd))]
+      : pathLoaded;
 
     if (loaded.length === 0) return { action: "continue" as const };
 
