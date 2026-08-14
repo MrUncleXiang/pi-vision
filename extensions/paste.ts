@@ -400,13 +400,16 @@ export default function pasteExtension(_pi: ExtensionAPI): void {
 
     if (mode === "off") {
       // Markers only — no attachment, no hint, no delegation.
-      return { action: "transform" as const, text };
+      // Give images:[] so pi core's `??` doesn't retain the original
+      // attachments (which would surface as "/image-omitted…/" placeholders
+      // on text-only models).
+      return { action: "transform" as const, text, images: [] };
     }
 
     if (mode === "hint") {
       // Markers + hint line nudging the model to call describe_image.
       text = `${text}\n${buildHintLine(loaded.map((l, i) => ({ token: l.token, index: resolved.get(l.token)?.index ?? i })))}`;
-      return { action: "transform" as const, text };
+      return { action: "transform" as const, text, images: [] };
     }
 
     // mode === "auto": auto-delegate each image in PARALLEL (v0.4.0 SPEC-4 §3.2)
@@ -425,13 +428,13 @@ export default function pasteExtension(_pi: ExtensionAPI): void {
     // can still call describe_image for cache hits (which local-only allows).
     if (config.localOnly) {
       text = `${text}\n${buildHintLine(hintImages)}`;
-      return { action: "transform" as const, text };
+      return { action: "transform" as const, text, images: [] };
     }
 
     if (!cache || !config.provider || !config.model) {
       // Can't delegate (no cache or unconfigured) → fall back to hint.
       text = `${text}\n${buildHintLine(hintImages)}`;
-      return { action: "transform" as const, text };
+      return { action: "transform" as const, text, images: [] };
     }
 
     const controller = new AbortController();
@@ -461,11 +464,11 @@ export default function pasteExtension(_pi: ExtensionAPI): void {
     if (ok === 0) {
       // All failed/timed out → hint fallback (with paths, §3.4).
       text = `${text}\n${buildHintLine(hintImages)}`;
-      return { action: "transform" as const, text };
+      return { action: "transform" as const, text, images: [] };
     }
 
     // Append the descriptions block.
     text = `${text}${buildDescriptionsBlock(descriptions, visionModel)}`;
-    return { action: "transform" as const, text };
+    return { action: "transform" as const, text, images: [] };
   });
 }
